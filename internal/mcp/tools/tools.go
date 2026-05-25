@@ -13,6 +13,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+const rpcTimeout = 10 * time.Second
+
 // MCPTools provides MCP tool implementations for Claude Code
 // Background stream listener runs zero tokens
 // Tools are invoked only when Claude Code calls them
@@ -52,6 +54,7 @@ func New(bridgeAddr, apiKey string, logger *zap.Logger) *MCPTools {
 func (m *MCPTools) StartStreamListener(ctx context.Context) {
 	go func() {
 		m.logger.Info("mcp: background stream listener started (0 tokens)")
+		backoff := 2 * time.Second
 		for {
 			select {
 			case <-ctx.Done():
@@ -63,6 +66,7 @@ func (m *MCPTools) StartStreamListener(ctx context.Context) {
 			if err := m.consumeTaskStream(ctx); err != nil {
 				m.logger.Warn("mcp: stream disconnected, retrying",
 					zap.Error(err),
+					zap.Duration("retry_in", backoff),
 				)
 			}
 
@@ -70,21 +74,33 @@ func (m *MCPTools) StartStreamListener(ctx context.Context) {
 			case <-ctx.Done():
 				m.logger.Info("mcp: background stream listener stopped")
 				return
-			case <-time.After(2 * time.Second):
+			case <-time.After(backoff):
+				if backoff < 30*time.Second {
+					backoff = backoff * 2
+					if backoff > 30*time.Second {
+						backoff = 30 * time.Second
+					}
+				}
 			}
 		}
 	}()
 }
 
 func (m *MCPTools) consumeTaskStream(ctx context.Context) error {
-	conn, err := grpc.NewClient(m.bridgeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	dialCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+
+	conn, err := grpc.DialContext(dialCtx, m.bridgeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
 		return fmt.Errorf("dial bridge: %w", err)
 	}
 	defer conn.Close()
 
 	client := bridgev1.NewBridgeServiceClient(conn)
-	stream, err := client.StreamTasks(ctx, &bridgev1.StreamTasksRequest{
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	defer streamCancel()
+
+	stream, err := client.StreamTasks(streamCtx, &bridgev1.StreamTasksRequest{
 		ApiKey:        m.apiKey,
 		SubjectFilter: "keys.*",
 	})
@@ -161,14 +177,17 @@ func (m *MCPTools) PublishTask(ctx context.Context, params PublishTaskParams) (s
 		params.BaseBranch = "main"
 	}
 
-	conn, err := grpc.NewClient(m.bridgeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+
+	conn, err := grpc.DialContext(rpcCtx, m.bridgeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
-		return "", fmt.Errorf("dial bridge: %w", err)
+		return fmt.Sprintf("Bridge unavailable. Task not published yet.\nObjective: %s\nRepo: %s\nReason: %v", params.Objective, params.Repo, err), nil
 	}
 	defer conn.Close()
 
 	client := bridgev1.NewBridgeServiceClient(conn)
-	resp, err := client.PublishTask(ctx, &bridgev1.PublishTaskRequest{
+	resp, err := client.PublishTask(rpcCtx, &bridgev1.PublishTaskRequest{
 		ApiKey:  m.apiKey,
 		Subject: fmt.Sprintf("keys.%s", params.Repo),
 		Payload: &bridgev1.TaskPayload{
@@ -186,7 +205,7 @@ func (m *MCPTools) PublishTask(ctx context.Context, params PublishTaskParams) (s
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("publish task: %w", err)
+		return fmt.Sprintf("Publish failed (bridge reachable but request failed).\nObjective: %s\nRepo: %s\nReason: %v", params.Objective, params.Repo, err), nil
 	}
 	taskID := resp.GetTaskId()
 
@@ -226,19 +245,22 @@ func (m *MCPTools) GetTaskStatus(ctx context.Context, taskID string) (string, er
 	}
 	m.mu.RUnlock()
 
-	conn, err := grpc.NewClient(m.bridgeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+
+	conn, err := grpc.DialContext(rpcCtx, m.bridgeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
-		return "", fmt.Errorf("dial bridge: %w", err)
+		return fmt.Sprintf(`{"task_id": %q, "status": "offline", "reason": %q}`, taskID, err.Error()), nil
 	}
 	defer conn.Close()
 
 	client := bridgev1.NewBridgeServiceClient(conn)
-	resp, err := client.GetTaskStatus(ctx, &bridgev1.GetTaskStatusRequest{
+	resp, err := client.GetTaskStatus(rpcCtx, &bridgev1.GetTaskStatusRequest{
 		ApiKey: m.apiKey,
 		TaskId: taskID,
 	})
 	if err != nil {
-		return "", fmt.Errorf("get task status: %w", err)
+		return fmt.Sprintf(`{"task_id": %q, "status": "unknown", "reason": %q}`, taskID, err.Error()), nil
 	}
 
 	result, _ := json.MarshalIndent(map[string]interface{}{
