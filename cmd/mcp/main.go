@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 	"gopkg.in/yaml.v3"
 
 	"github.com/verzth/mcp-agent-workflow/internal/mcp/tools"
@@ -52,8 +53,7 @@ func main() {
 		logger.Fatal("failed to load config", zap.Error(err))
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := context.Background()
 
 	// MCP Tools
 	mcpTools := tools.New(cfg.MCP.BridgeGRPCAddr, cfg.MCP.APIKey, logger)
@@ -61,51 +61,61 @@ func main() {
 	// Start background stream listener (zero tokens)
 	mcpTools.StartStreamListener(ctx)
 
-	// Register MCP server using mcp-go SDK
-	// server := mcp.NewServer("hermes-mcp", mcp.WithVersion("1.0.0"))
-	//
-	// server.AddTool(mcp.Tool{
-	//     Name:        "publish_task",
-	//     Description: "Publish a task to Hermes for autonomous code execution. Hermes will clone the repo, apply changes, and open an MR.",
-	//     InputSchema: publishTaskSchema,
-	// }, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	//     var params tools.PublishTaskParams
-	//     json.Unmarshal(req.Params.Arguments, &params)
-	//     result, err := mcpTools.PublishTask(ctx, params)
-	//     return &mcp.CallToolResult{Content: []mcp.Content{{Type: "text", Text: result}}}, err
-	// })
-	//
-	// server.AddTool(mcp.Tool{
-	//     Name:        "get_task_status",
-	//     Description: "Get execution status of a Hermes task by ID",
-	//     InputSchema: statusSchema,
-	// }, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	//     taskID := req.Params.Arguments["task_id"].(string)
-	//     result, err := mcpTools.GetTaskStatus(ctx, taskID)
-	//     return &mcp.CallToolResult{Content: []mcp.Content{{Type: "text", Text: result}}}, err
-	// })
-	//
-	// server.AddTool(mcp.Tool{
-	//     Name:        "get_pending_tasks",
-	//     Description: "List all pending and recently completed Hermes tasks",
-	// }, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	//     result, err := mcpTools.GetPendingTasks(ctx)
-	//     return &mcp.CallToolResult{Content: []mcp.Content{{Type: "text", Text: result}}}, err
-	// })
-	//
-	// // Start as stdio transport (for Claude Code)
-	// server.ServeStdio()
+	s := server.NewMCPServer("agent-workflow-mcp", "1.0.0")
 
-	_ = mcpTools
+	publishTool := mcp.NewTool("publish_task",
+		mcp.WithDescription("Publish a task to Agent Workflow"),
+		mcp.WithString("objective", mcp.Required(), mcp.Description("What Agent should accomplish")),
+		mcp.WithString("context", mcp.Description("Additional context for task")),
+		mcp.WithString("repo", mcp.Required(), mcp.Description("Repository name or slug")),
+		mcp.WithString("base_branch", mcp.Description("Base branch, default main")),
+		mcp.WithString("work_branch", mcp.Description("Work branch name")),
+		mcp.WithArray("constraints", mcp.Description("Rules agent must follow")),
+		mcp.WithString("mr_target_repo", mcp.Description("Target repo for MR")),
+		mcp.WithString("mr_target_branch", mcp.Description("Target branch for MR")),
+		mcp.WithString("mr_title", mcp.Description("Merge request title")),
+	)
+
+	s.AddTool(publishTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		params := tools.PublishTaskParams{}
+		b, _ := json.Marshal(args)
+		_ = json.Unmarshal(b, &params)
+		result, err := mcpTools.PublishTask(ctx, params)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return mcp.NewToolResultText(result), nil
+	})
+
+	statusTool := mcp.NewTool("get_task_status",
+		mcp.WithDescription("Get task status by task ID"),
+		mcp.WithString("task_id", mcp.Required(), mcp.Description("Task ID")),
+	)
+
+	s.AddTool(statusTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		taskID, _ := req.RequireString("task_id")
+		result, err := mcpTools.GetTaskStatus(ctx, taskID)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return mcp.NewToolResultText(result), nil
+	})
+
+	pendingTool := mcp.NewTool("get_pending_tasks", mcp.WithDescription("List pending tasks from MCP cache"))
+	s.AddTool(pendingTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		result, err := mcpTools.GetPendingTasks(ctx)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return mcp.NewToolResultText(result), nil
+	})
 
 	logger.Info("mcp server ready",
 		zap.String("bridge", cfg.MCP.BridgeGRPCAddr),
 	)
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-
-	cancel()
-	logger.Info("mcp server stopped")
+	if err := server.ServeStdio(s); err != nil {
+		logger.Fatal("mcp stdio server failed", zap.Error(err))
+	}
 }
