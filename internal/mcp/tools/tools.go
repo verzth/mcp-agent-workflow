@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,9 @@ func New(bridgeAddr, apiKey string, topics []string, logger *zap.Logger) *MCPToo
 	if len(topics) == 0 {
 		topics = []string{"global.>"}
 	}
+	for i := range topics {
+		topics[i] = normalizeTopicFilter(topics[i])
+	}
 	return &MCPTools{
 		bridgeAddr:   bridgeAddr,
 		apiKey:       apiKey,
@@ -50,6 +54,17 @@ func New(bridgeAddr, apiKey string, topics []string, logger *zap.Logger) *MCPToo
 		pendingTasks: make([]TaskStatus, 0),
 		completedLog: make([]TaskStatus, 0),
 	}
+}
+
+func normalizeTopicFilter(topic string) string {
+	t := strings.TrimSpace(topic)
+	if t == "" {
+		return "global.>"
+	}
+	if strings.Contains(t, ".") {
+		return t
+	}
+	return "global." + t
 }
 
 // --- Background Stream Listener (zero tokens) ---
