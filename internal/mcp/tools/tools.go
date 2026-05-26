@@ -159,6 +159,13 @@ func (m *MCPTools) updateTaskStatus(event *bridgev1.StreamTasksResponse) {
 	if p := event.GetPayload(); p != nil {
 		status.Objective = p.GetObjective()
 	}
+
+	m.logger.Info("mcp: event received",
+		zap.String("task_id", status.TaskID),
+		zap.String("status", status.Status),
+		zap.String("objective", status.Objective),
+	)
+
 	if status.Status == "" {
 		status.Status = "pending"
 	}
