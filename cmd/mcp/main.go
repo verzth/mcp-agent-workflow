@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -115,6 +117,15 @@ func main() {
 	logger.Info("mcp server ready",
 		zap.String("bridge", cfg.MCP.BridgeGRPCAddr),
 	)
+
+	if os.Getenv("MCP_DAEMON") == "1" {
+		logger.Info("mcp daemon mode enabled; stdio transport disabled")
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		logger.Info("mcp daemon stopped")
+		return
+	}
 
 	if err := server.ServeStdio(s); err != nil {
 		logger.Fatal("mcp stdio server failed", zap.Error(err))
