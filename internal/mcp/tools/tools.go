@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"crypto/tls"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -11,10 +13,22 @@ import (
 	bridgev1 "github.com/verzth/agent-workflow-contracts/bridge/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 const rpcTimeout = 10 * time.Second
+
+func dialOptionsForBridge(addr string) []grpc.DialOption {
+	host, port, err := net.SplitHostPort(addr)
+	if err == nil && port == "443" {
+		return []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{ServerName: host}))}
+	}
+	if strings.HasPrefix(addr, "localhost:") || strings.HasPrefix(addr, "127.0.0.1:") {
+		return []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	}
+	return []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{}))}
+}
 
 // MCPTools provides MCP tool implementations for Claude Code
 // Background stream listener runs zero tokens
@@ -114,14 +128,30 @@ func (m *MCPTools) StartStreamListener(ctx context.Context) {
 }
 
 func (m *MCPTools) consumeTaskStream(ctx context.Context, topic string) error {
+	m.logger.Info("mcp: stream dial start",
+		zap.String("bridge", m.bridgeAddr),
+		zap.String("topic", topic),
+	)
+
 	dialCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	defer cancel()
 
-	conn, err := grpc.DialContext(dialCtx, m.bridgeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	dialOpts := append(dialOptionsForBridge(m.bridgeAddr), grpc.WithBlock())
+	conn, err := grpc.DialContext(dialCtx, m.bridgeAddr, dialOpts...)
 	if err != nil {
+		m.logger.Warn("mcp: stream dial failed",
+			zap.String("bridge", m.bridgeAddr),
+			zap.String("topic", topic),
+			zap.Error(err),
+		)
 		return fmt.Errorf("dial bridge: %w", err)
 	}
 	defer conn.Close()
+
+	m.logger.Info("mcp: stream dial success",
+		zap.String("bridge", m.bridgeAddr),
+		zap.String("topic", topic),
+	)
 
 	client := bridgev1.NewBridgeServiceClient(conn)
 	streamCtx, streamCancel := context.WithCancel(ctx)
@@ -132,12 +162,24 @@ func (m *MCPTools) consumeTaskStream(ctx context.Context, topic string) error {
 		SubjectFilter: topic,
 	})
 	if err != nil {
+		m.logger.Warn("mcp: stream subscribe failed",
+			zap.String("topic", topic),
+			zap.Error(err),
+		)
 		return fmt.Errorf("start stream: %w", err)
 	}
+
+	m.logger.Info("mcp: stream connected",
+		zap.String("topic", topic),
+	)
 
 	for {
 		event, err := stream.Recv()
 		if err != nil {
+			m.logger.Warn("mcp: stream recv failed",
+				zap.String("topic", topic),
+				zap.Error(err),
+			)
 			return fmt.Errorf("recv stream: %w", err)
 		}
 		m.updateTaskStatus(event)
@@ -214,7 +256,8 @@ func (m *MCPTools) PublishTask(ctx context.Context, params PublishTaskParams) (s
 	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	defer cancel()
 
-	conn, err := grpc.DialContext(rpcCtx, m.bridgeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	dialOpts := append(dialOptionsForBridge(m.bridgeAddr), grpc.WithBlock())
+	conn, err := grpc.DialContext(rpcCtx, m.bridgeAddr, dialOpts...)
 	if err != nil {
 		return fmt.Sprintf("Bridge unavailable. Task not published yet.\nObjective: %s\nRepo: %s\nReason: %v", params.Objective, params.Repo, err), nil
 	}
