@@ -10,7 +10,7 @@ import (
 )
 
 func TestPublishTask_OfflineReturnsSafeMessage(t *testing.T) {
-	m := New("127.0.0.1:1", "dummy-key", zap.NewNop())
+	m := New("127.0.0.1:1", "dummy-key", nil, zap.NewNop())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -28,7 +28,7 @@ func TestPublishTask_OfflineReturnsSafeMessage(t *testing.T) {
 }
 
 func TestGetTaskStatus_OfflineReturnsSafeJSON(t *testing.T) {
-	m := New("127.0.0.1:1", "dummy-key", zap.NewNop())
+	m := New("127.0.0.1:1", "dummy-key", nil, zap.NewNop())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

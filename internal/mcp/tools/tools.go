@@ -21,6 +21,7 @@ const rpcTimeout = 10 * time.Second
 type MCPTools struct {
 	bridgeAddr string
 	apiKey     string
+	topics     []string
 	logger     *zap.Logger
 
 	// Background state — populated by gRPC stream, zero tokens
@@ -37,10 +38,14 @@ type TaskStatus struct {
 	MRUrl     string `json:"mr_url,omitempty"`
 }
 
-func New(bridgeAddr, apiKey string, logger *zap.Logger) *MCPTools {
+func New(bridgeAddr, apiKey string, topics []string, logger *zap.Logger) *MCPTools {
+	if len(topics) == 0 {
+		topics = []string{"global.>"}
+	}
 	return &MCPTools{
 		bridgeAddr:   bridgeAddr,
 		apiKey:       apiKey,
+		topics:       topics,
 		logger:       logger,
 		pendingTasks: make([]TaskStatus, 0),
 		completedLog: make([]TaskStatus, 0),
@@ -54,39 +59,46 @@ func New(bridgeAddr, apiKey string, logger *zap.Logger) *MCPTools {
 func (m *MCPTools) StartStreamListener(ctx context.Context) {
 	go func() {
 		m.logger.Info("mcp: background stream listener started (0 tokens)")
-		backoff := 2 * time.Second
-		for {
-			select {
-			case <-ctx.Done():
-				m.logger.Info("mcp: background stream listener stopped")
-				return
-			default:
-			}
+		for _, topic := range m.topics {
+			topic := topic
+			go func() {
+				backoff := 2 * time.Second
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
 
-			if err := m.consumeTaskStream(ctx); err != nil {
-				m.logger.Warn("mcp: stream disconnected, retrying",
-					zap.Error(err),
-					zap.Duration("retry_in", backoff),
-				)
-			}
+					if err := m.consumeTaskStream(ctx, topic); err != nil {
+						m.logger.Warn("mcp: stream disconnected, retrying",
+							zap.String("topic", topic),
+							zap.Error(err),
+							zap.Duration("retry_in", backoff),
+						)
+					}
 
-			select {
-			case <-ctx.Done():
-				m.logger.Info("mcp: background stream listener stopped")
-				return
-			case <-time.After(backoff):
-				if backoff < 30*time.Second {
-					backoff = backoff * 2
-					if backoff > 30*time.Second {
-						backoff = 30 * time.Second
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(backoff):
+						if backoff < 30*time.Second {
+							backoff = backoff * 2
+							if backoff > 30*time.Second {
+								backoff = 30 * time.Second
+							}
+						}
 					}
 				}
-			}
+			}()
 		}
+
+		<-ctx.Done()
+		m.logger.Info("mcp: background stream listener stopped")
 	}()
 }
 
-func (m *MCPTools) consumeTaskStream(ctx context.Context) error {
+func (m *MCPTools) consumeTaskStream(ctx context.Context, topic string) error {
 	dialCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	defer cancel()
 
@@ -102,7 +114,7 @@ func (m *MCPTools) consumeTaskStream(ctx context.Context) error {
 
 	stream, err := client.StreamTasks(streamCtx, &bridgev1.StreamTasksRequest{
 		ApiKey:        m.apiKey,
-		SubjectFilter: "keys.*",
+		SubjectFilter: topic,
 	})
 	if err != nil {
 		return fmt.Errorf("start stream: %w", err)
@@ -189,7 +201,7 @@ func (m *MCPTools) PublishTask(ctx context.Context, params PublishTaskParams) (s
 	client := bridgev1.NewBridgeServiceClient(conn)
 	resp, err := client.PublishTask(rpcCtx, &bridgev1.PublishTaskRequest{
 		ApiKey:  m.apiKey,
-		Subject: fmt.Sprintf("keys.%s", params.Repo),
+		Subject: fmt.Sprintf("global.%s", params.Repo),
 		Payload: &bridgev1.TaskPayload{
 			Objective:   params.Objective,
 			Context:     params.Context,

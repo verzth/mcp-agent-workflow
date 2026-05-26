@@ -18,6 +18,7 @@ type mcpConfig struct {
 	MCP struct {
 		BridgeGRPCAddr string `yaml:"bridge_grpc_addr"`
 		APIKey         string `yaml:"api_key"`
+		Topics         []string `yaml:"topics"`
 	} `yaml:"mcp"`
 }
 
@@ -56,7 +57,7 @@ func main() {
 	ctx := context.Background()
 
 	// MCP Tools
-	mcpTools := tools.New(cfg.MCP.BridgeGRPCAddr, cfg.MCP.APIKey, logger)
+	mcpTools := tools.New(cfg.MCP.BridgeGRPCAddr, cfg.MCP.APIKey, cfg.MCP.Topics, logger)
 
 	// Start background stream listener (zero tokens)
 	mcpTools.StartStreamListener(ctx)
